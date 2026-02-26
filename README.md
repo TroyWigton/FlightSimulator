@@ -1,5 +1,9 @@
 # Fixed-Wing Flight Simulator (Python)
 
+<p align="center">
+  <img src="docs/images/flight-sim-preview.png" alt="Flight Simulator UI Preview" width="1100" />
+</p>
+
 Real-time fixed-wing aircraft simulation with a PID flight-control layer, runway takeoff phase, and interactive pilot inputs.
 
 ## Features
