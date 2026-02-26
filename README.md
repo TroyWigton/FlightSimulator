@@ -47,35 +47,76 @@ The UI shows a top-center **Throttle / Power** bar with both commanded and actua
 
 ## Control Method
 
-The simulator uses direct attitude/throttle tracking with PID blocks and phase-dependent pitch shaping:
+The implemented controller is best described as an **attitude-command / attitude-hold (ACAH)** structure with **rate-feedback augmentation** and command shaping:
 
-- Roll channel: bank target $\phi_c$ tracked with aileron command $\delta_a$.
-- Pitch channel: pitch target $\theta_c$ tracked with elevator command $\delta_e$, with pitch-target filtering and explicit $q$-rate damping.
-- Yaw channel: yaw-rate damping around $r=0$ using rudder $\delta_r$.
-- Throttle channel: commanded throttle target tracked through first-order throttle actuator dynamics.
+- Lateral attitude-hold channel: bank target $\phi_c$ tracked with aileron command $\delta_a$.
+- Longitudinal attitude-hold channel: pitch target $\theta_c$ tracked with elevator command $\delta_e$.
+- Inner-loop-like augmentation: direct body-rate feedback ($p$ and $q$ damping paths) added at control-surface command level.
+- Yaw stabilization channel: yaw-rate damper around $r=0$ using rudder $\delta_r$.
+- Propulsion channel: throttle command $T_c$ tracked by first-order throttle actuator dynamics.
 
-### Controller Architecture (Style Block Diagram)
+This is not a strict textbook two-loop cascade (outer attitude loop commanding an explicit inner rate-loop controller state), but it is **cascade-equivalent in effect**: attitude tracking is stabilized by fast rate-feedback augmentation.
+
+### Controller Architecture (Control-Design View)
 
 ```mermaid
+%%{init: {"themeVariables": {"fontSize": "20px"}} }%%
 flowchart LR
-    Pilot["Pilot Inputs\n(bank, pitch, throttle)"] --> Targets["Target Commands\nφc, θc, Tc"]
-    Targets --> RollPID["Roll PID\n+ p-rate damping"]
-    Targets --> PitchPID["Pitch PID\n+ q-rate damping"]
-    Targets --> ThrPID["Throttle PID"]
-    YawDamper["Yaw Damper PID\n(r -> 0)"] --> Plant
-    RollPID --> Plant["Aircraft Dynamics Plant"]
-    PitchPID --> Plant
-    ThrPID --> Plant
-    Plant --> Sensors["Measured States\nφ, θ, p, q, r, throttle"]
-    Sensors --> RollPID
-    Sensors --> PitchPID
-    Sensors --> ThrPID
-    Sensors --> YawDamper
+    P["Pilot / Guidance\nCommands: φc, θc, Tc"]
+
+    subgraph LAT["Lateral Channel (Bank Hold + Rate Damping)"]
+      Sphi["Σ: eφ = φc - φ"] --> Cphi["Cφ(s): PID attitude controller"]
+      Cphi --> Sda["Σ: δa* = uφ - Kp_damp·p"]
+      Sda --> Ra["Rate limit + saturation"]
+      Ra --> Da["δa"]
+    end
+
+    subgraph LON["Longitudinal Channel (Pitch Hold + Rate Damping)"]
+      Stheta["Σ: eθ = θc - θ"] --> Ctheta["Cθ(s): PID attitude controller\n+ target filter / scheduling"]
+      Ctheta --> Sde["Σ: δe* = uθ + Kq_damp·q"]
+      Sde --> Re["Rate limit + saturation"]
+      Re --> De["δe"]
+    end
+
+    subgraph YAW["Yaw Stabilization"]
+      Sr["Σ: er = 0 - r"] --> Cr["Cr(s): yaw damper PID"]
+      Cr --> Dr["δr"]
+    end
+
+    subgraph THR["Propulsion"]
+      St["Σ: eT = Tc - Ta"] --> Ct["CT(s): throttle PID"]
+      Ct --> Dt["Tcmd"]
+    end
+
+    Plant["Nonlinear Aircraft Plant\nRigid-body + aero + ground + throttle actuator"]
+
+    P --> Sphi
+    P --> Stheta
+    P --> St
+
+    Da --> Plant
+    De --> Plant
+    Dr --> Plant
+    Dt --> Plant
+
+    Plant --> Mphi["φ"]
+    Plant --> Mtheta["θ"]
+    Plant --> Mp["p"]
+    Plant --> Mq["q"]
+    Plant --> Mr["r"]
+    Plant --> Mta["Ta"]
+
+    Mphi --> Sphi
+    Mtheta --> Stheta
+    Mp --> Sda
+    Mq --> Sde
+    Mr --> Sr
+    Mta --> St
 ```
 
 ### Control Law Summary
 
-- Generic PID output:
+- Generic PID compensator form:
 
 $$
 u = K_p e + K_i \int e\,dt + K_d \hat{\dot{y}}
@@ -83,12 +124,27 @@ $$
 
 where $\hat{\dot{y}}$ is filtered derivative-on-measurement feedback (used to reduce derivative kick).
 
-- Additional controller logic in code includes:
-  - command clamping: bank/pitch targets are clamped to ±45°,
-  - takeoff rotation bias near rotation speed,
-  - liftoff latch and low-altitude climb floor logic,
-  - performance-mode climb-rate augmentation,
-  - command-rate limiting on aileron/elevator to reduce chatter.
+- Implemented channel equations (matching code structure):
+
+$$
+\delta_a^* = C_\phi(e_\phi) - K_{p,damp}\,p,
+\qquad
+e_\phi = \phi_c - \phi
+$$
+
+$$
+\delta_e^* = C_\theta(e_\theta) + K_{q,damp}\,q,
+\qquad
+e_\theta = \theta_c - \theta
+$$
+
+$$
+\delta_r = C_r(0-r),
+\qquad
+T_{cmd} = C_T(T_c - T_a)
+$$
+
+with command filters, mode-dependent pitch shaping (takeoff/liftoff logic), and control-surface rate/saturation limits applied before plant input.
 
 ## Dynamic System Representation
 
@@ -244,7 +300,7 @@ When on runway ($z_D \ge 0$), the simulator adds:
 - wheel-on-ground constraint before liftoff criteria are met,
 - takeoff rotation assist and liftoff gating based on speed + lift/pitch conditions.
 
-This gives a continuous rollout \(\to\) rotation \(\to\) climb transition without a mode switch in the state equations.
+This gives a continuous rollout → rotation → climb transition without a mode switch in the state equations.
 
 ### Throttle Actuator Dynamics
 
@@ -297,6 +353,155 @@ This local model captures conventional small-disturbance modes near trim (before
   - Driven by $C_{l\beta}, C_{lp}, C_{lr}, C_{n\beta}, C_{nr}, C_{np}$ and control derivatives.
 
 In deep stall, the model intentionally becomes strongly nonlinear (lift break, drag rise, control degradation, asymmetric coupling), so linear modal interpretation is only locally valid.
+
+### Reproducible Trim + Numeric ABCD (Current Code)
+
+State-space matrices are generated from the current nonlinear plant implementation in `tools/linearize_state_space.py` using finite-difference Jacobians about a numerically solved airborne trim.
+
+Run:
+
+```bash
+python tools/linearize_state_space.py
+```
+
+Trim point used below (current model):
+
+- $u = 35.0$ m/s
+- $w = 2.84998$ m/s
+- $\theta = 4.6552^\circ$
+- $\delta_e = -3.2805^\circ$
+- $T_a = T_c = 0.09882$
+- $z_D = -100$ m (airborne)
+
+State ordering:
+
+$$
+x=[x_N, y_E, z_D, u, v, w, \phi, \theta, \psi, p, q, r, T_a]^\top
+$$
+
+Input ordering:
+
+$$
+u=[\delta_a, \delta_e, \delta_r, T_c]^\top
+$$
+
+Linearized form:
+
+$$
+\dot{x}=A\Delta x+B\Delta u,\quad y=C\Delta x + D\Delta u
+$$
+
+#### Numeric $A$ Matrix (13x13)
+
+```text
+[ 0.0000,  0.0000,  0.0000,  0.9967,  0.0000,  0.0812,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000]
+[ 0.0000,  0.0000,  0.0000,  0.0000,  1.0000,  0.0000, -2.8500,  0.0000,  35.1158,  0.0000,  0.0000,  0.0000,  0.0000]
+[ 0.0000,  0.0000,  0.0000, -0.0812,  0.0000,  0.9967,  0.0000, -35.1158,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000]
+[ 0.0000,  0.0000,  0.0000, -0.0092,  0.0000,  0.2614,  0.0000, -9.7743,  0.0000,  0.0000, -2.8654,  0.0000,  5.9074]
+[ 0.0000,  0.0000,  0.0000,  0.0000, -0.2597,  0.0000,  9.7743,  0.0000,  0.0000,  2.8500,  0.0000, -35.0000,  0.0000]
+[ 0.0000,  0.0000,  0.0000, -0.4050,  0.0000, -1.8859,  0.0000, -0.7959,  0.0000,  0.0000,  33.3228,  0.0000,  0.0000]
+[ 0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  1.0000,  0.0000,  0.0814,  0.0000]
+[ 0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  1.0000,  0.0000,  0.0000]
+[ 0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  1.0033,  0.0000]
+[ 0.0000,  0.0000,  0.0000,  0.0000, -0.3547,  0.0000,  0.0000,  0.0000,  0.0000, -8.8594,  0.0000,  1.6108,  0.0000]
+[ 0.0000,  0.0000,  0.0000,  0.0198,  0.0000, -0.2426,  0.0000,  0.0000,  0.0000,  0.0000, -2.2553,  0.0000,  0.0000]
+[ 0.0000,  0.0000,  0.0000,  0.0000,  0.3563,  0.0000,  0.0000,  0.0000,  0.0000, -0.1553,  0.0000, -2.4854,  0.0000]
+[ 0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000, -2.8571]
+```
+
+#### Numeric $B$ Matrix (13x4)
+
+```text
+[ 0.0000,  0.0000,  0.0000,  0.0000]
+[ 0.0000,  0.0000,  0.0000,  0.0000]
+[ 0.0000,  0.0000,  0.0000,  0.0000]
+[ 0.0000, -0.0877,  0.0000,  0.0017]
+[ 0.5562,  0.0000,  1.7797,  0.0000]
+[ 0.0000, -9.5354,  0.0000,  0.0000]
+[ 0.0000,  0.0000,  0.0000,  0.0000]
+[ 0.0000,  0.0000,  0.0000,  0.0000]
+[ 0.0000,  0.0000,  0.0000,  0.0000]
+[ 16.6062,  0.0000,  2.0758,  0.0000]
+[ 0.0000, -18.1021,  0.0000,  0.0000]
+[ 0.5004,  0.0000, -6.0053,  0.0000]
+[ 0.0000,  0.0000,  0.0000,  2.8571]
+```
+
+#### Numeric $C$ and $D$ (full-state output convention)
+
+- $C = I_{13}$
+- $D = 0_{13\times4}$
+
+### How each $A,B,C,D$ cell is formulated
+
+For the nonlinear system
+
+$$
+\dot{x}=f(x,u),\quad y=g(x,u),
+$$
+
+the linearized cell definitions are:
+
+$$
+A_{ij}=\left.\frac{\partial f_i}{\partial x_j}\right|_{(\bar{x},\bar{u})},
+\quad
+B_{ij}=\left.\frac{\partial f_i}{\partial u_j}\right|_{(\bar{x},\bar{u})},
+\quad
+C_{ij}=\left.\frac{\partial g_i}{\partial x_j}\right|_{(\bar{x},\bar{u})},
+\quad
+D_{ij}=\left.\frac{\partial g_i}{\partial u_j}\right|_{(\bar{x},\bar{u})}.
+$$
+
+In `tools/linearize_state_space.py`, these are computed with central finite differences:
+
+$$
+\frac{\partial f_i}{\partial x_j}\approx\frac{f_i(\bar{x}+\epsilon_j e_j,\bar{u})-f_i(\bar{x}-\epsilon_j e_j,\bar{u})}{2\epsilon_j}
+$$
+
+and similarly for $\partial f_i/\partial u_j$.
+
+Representative analytic dependence of entries on physical parameters:
+
+- Translational rows use
+  $$
+  \dot{u}=rv-qw+\frac{X}{m},\ \dot{v}=pw-ru+\frac{Y}{m},\ \dot{w}=qu-pv+\frac{Z}{m}
+  $$
+  so entries such as $A_{u,u},A_{u,w},A_{u,\theta}$ depend on derivatives of $X$ with respect to $(u,w,\theta)$ divided by $m$.
+
+- Aerodynamic force derivatives are driven by
+  $$
+  X,Z \leftarrow qS\{C_L,C_D\},\quad q=\tfrac12\rho V^2,
+  $$
+  with $C_L$ and $C_D$ containing $C_{L\alpha},C_{Lq},C_{L\delta_e},C_{D0},k$ and stall terms.
+
+- Rotational rows use
+  $$
+  \dot{p}=\frac{\mathcal L-(I_z-I_y)qr}{I_x},\quad
+  \dot{q}=\frac{\mathcal M-(I_x-I_z)pr}{I_y},\quad
+  \dot{r}=\frac{\mathcal N-(I_y-I_x)pq}{I_z},
+  $$
+  where
+  $$
+  \mathcal L=qSbC_l,\ \mathcal M=qScC_m,\ \mathcal N=qSbC_n.
+  $$
+  Thus entries in the $p,q,r$ rows are shaped by $(I_x,I_y,I_z)$ and stability/control derivatives such as $C_{lp},C_{lr},C_{l\beta},C_{mq},C_{m\alpha},C_{n\beta},C_{nr}$.
+
+- Throttle state row is directly
+  $$
+  \dot T_a=\frac{T_c-T_a}{\tau_T}
+  $$
+  giving
+  $$
+  A_{T_a,T_a}=-\frac1{\tau_T},\quad B_{T_a,T_c}=\frac1{\tau_T}.
+  $$
+
+- Kinematic rows come from the rotation matrix and Euler kinematics, e.g.
+  $$
+  \dot\theta = q\cos\phi-r\sin\phi,
+  $$
+  and position rates from body-to-NED projection.
+
+Because the implemented aerodynamics include stall piecewise logic and on-ground conditionals, these Jacobians are valid only for the selected airborne trim point and small perturbations around it.
 
 ### Aerodynamic/Control Derivative Values (Plugged into Model)
 
