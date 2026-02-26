@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime
 import math
+from pathlib import Path
 import pygame
+import shutil
+import subprocess
 
 from .config import AircraftParameters, SimConfig
 from .controller import FlightController, PilotTargets
@@ -38,6 +42,11 @@ class FlightSimulatorApp:
         self.targets = PilotTargets(bank_rad=0.0, pitch_rad=math.radians(3.0), throttle=0.0)
         self.notice_text = ""
         self.notice_time_s = 0.0
+        self.recording = False
+        self.recording_root = Path("recordings")
+        self.recording_session_dir: Path | None = None
+        self.recording_frame_idx = 0
+        self.recording_frame_ext = "png"
 
     @staticmethod
     def _digit_from_key(key: int) -> int | None:
@@ -76,6 +85,12 @@ class FlightSimulatorApp:
                     self.notice_text = f"Mode: {self.controller.mode_name()}"
                     self.notice_time_s = 1.2
 
+                if event.key == pygame.K_v:
+                    if not self.recording:
+                        self._start_recording()
+                    else:
+                        self._stop_recording()
+
                 if event.key == pygame.K_UP:
                     self.targets.pitch_rad += math.radians(2.0)
                 if event.key == pygame.K_DOWN:
@@ -109,6 +124,67 @@ class FlightSimulatorApp:
         self.targets.pitch_rad = max(math.radians(-45.0), min(math.radians(45.0), self.targets.pitch_rad))
         return True
 
+    def _start_recording(self) -> None:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_dir = self.recording_root / f"flight_{stamp}"
+        frames_dir = session_dir / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+
+        self.recording = True
+        self.recording_session_dir = session_dir
+        self.recording_frame_idx = 0
+        self.recording_frame_ext = "png"
+        self.notice_text = f"Recording ON: {session_dir}"
+        self.notice_time_s = 1.5
+
+    def _stop_recording(self) -> None:
+        self.recording = False
+        if self.recording_session_dir is None:
+            self.notice_text = "Recording stopped"
+            self.notice_time_s = 1.0
+            return
+
+        session_dir = self.recording_session_dir
+        frames_dir = session_dir / "frames"
+        output_file = session_dir / "flight.mp4"
+
+        if self.recording_frame_idx < 2:
+            self.notice_text = "Recording stopped (not enough frames)"
+            self.notice_time_s = 1.6
+            self.recording_session_dir = None
+            return
+
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            self.notice_text = "Recording saved as PNG frames (install ffmpeg for MP4)"
+            self.notice_time_s = 2.4
+            self.recording_session_dir = None
+            return
+
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-framerate",
+            str(self.cfg.fps),
+            "-i",
+            str(frames_dir / f"frame_%06d.{self.recording_frame_ext}"),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(output_file),
+        ]
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            shutil.rmtree(frames_dir, ignore_errors=True)
+            self.notice_text = f"Recording saved: {output_file}"
+            self.notice_time_s = 2.4
+        except Exception:
+            self.notice_text = "ffmpeg encode failed (raw frames kept)"
+            self.notice_time_s = 2.4
+
+        self.recording_session_dir = None
+
     def run(self) -> None:
         running = True
         clock = pygame.time.Clock()
@@ -124,6 +200,25 @@ class FlightSimulatorApp:
             notice = self.notice_text if self.notice_time_s > 0.0 else ""
 
             self.display.render(self.state, self.targets, controls, notice, self.controller.mode_name())
+
+            if self.recording and self.recording_session_dir is not None:
+                frame_path = self.recording_session_dir / "frames" / f"frame_{self.recording_frame_idx:06d}.{self.recording_frame_ext}"
+                try:
+                    pygame.image.save(self.display.screen, str(frame_path))
+                except NotImplementedError:
+                    if self.recording_frame_ext == "png":
+                        self.recording_frame_ext = "bmp"
+                        frame_path = self.recording_session_dir / "frames" / f"frame_{self.recording_frame_idx:06d}.bmp"
+                        pygame.image.save(self.display.screen, str(frame_path))
+                        self.notice_text = "PNG unsupported, recording as BMP frames"
+                        self.notice_time_s = 2.0
+                    else:
+                        raise
+                self.recording_frame_idx += 1
+
             clock.tick(self.cfg.fps)
+
+        if self.recording:
+            self._stop_recording()
 
         self.display.close()

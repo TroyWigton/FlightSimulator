@@ -426,6 +426,7 @@ class FlightDisplay:
                 "Arrow Left/Right: command bank angle (\u00b145\u00b0 max)",
                 "Arrow Up/Down: command pitch angle (\u00b145\u00b0 max)",
                 "Number keys 0..9: latch throttle (0%..100%, 9=max)",
+                "V: toggle video recording (MP4 if ffmpeg is installed)",
                 "R: reset to runway start",
                 f"Cmd Bank: {math.degrees(targets.bank_rad):6.1f} deg",
                 f"Cmd Pitch: {math.degrees(targets.pitch_rad):6.1f} deg",

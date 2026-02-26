@@ -40,6 +40,10 @@ On macOS you can also use:
   - `0` = `0%`
   - `9` = `100%`
   - Command persists after key release.
+- `V` : start/stop flight recording.
+  - Saves frames to `recordings/flight_<timestamp>/frames` (PNG, or BMP fallback if PNG is unavailable in local pygame build).
+  - If `ffmpeg` is installed, also writes `recordings/flight_<timestamp>/flight.mp4`.
+  - On successful MP4 encode, the raw frame folder is removed automatically.
 - `R` : reset to runway start.
 - `ESC` : quit.
 
