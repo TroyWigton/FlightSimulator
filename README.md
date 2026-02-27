@@ -48,6 +48,7 @@ On macOS you can also use:
   - Saves frames to `recordings/flight_<timestamp>/frames` (PNG, or BMP fallback if PNG is unavailable in local pygame build).
   - If `ffmpeg` is installed, also writes `recordings/flight_<timestamp>/flight.mp4`.
   - On successful MP4 encode, the raw frame folder is removed automatically.
+- `M` : toggle controller mode (`STABLE` / `PERFORMANCE`).
 - `R` : reset to runway start.
 - `ESC` : quit.
 
@@ -218,6 +219,15 @@ $$
 
 with additional effective takeoff-angle shaping near ground through wing incidence and pitch contribution.
 
+### Derivative Units and Normalization Conventions
+
+To make coefficient meanings unambiguous:
+
+- Angle derivatives (e.g., $C_{L\alpha}, C_{m\alpha}, C_{Y\beta}, C_{n\beta}$) are used as per-radian slopes because $\alpha$ and $\beta$ are in radians.
+- Control derivatives (e.g., $C_{L\delta_e}, C_{l\delta_a}, C_{n\delta_r}$) are per-radian sensitivities to control-surface deflection, with deflections in radians.
+- Rate derivatives (e.g., $C_{Lq}, C_{mq}, C_{lp}, C_{nr}$) multiply nondimensional rates such as $qc/(2V)$ and $pb/(2V)$, so these derivatives themselves are nondimensional in this formulation.
+- Terms with subscript $0$ (e.g., $C_{L0}, C_{D0}, C_{m0}$) are baseline offsets, not slopes.
+
 ### Aerodynamic Coefficient Model
 
 The baseline (pre-stall) coefficient forms are affine in states/inputs (with induced drag nonlinearity):
@@ -263,11 +273,9 @@ L = \bar{q}S C_L,\quad D = \bar{q}S C_D,\quad Y = \bar{q}S C_Y
 $$
 
 $$
-\begin{aligned}
-\mathcal{L} &= \bar{q}Sb C_l \\
-\mathcal{M} &= \bar{q}Sc C_m \\
-\mathcal{N} &= \bar{q}Sb C_n
-\end{aligned}
+\mathcal{L} = \bar{q}Sb C_l,\quad
+\mathcal{M} = \bar{q}Sc C_m,\quad
+\mathcal{N} = \bar{q}Sb C_n
 $$
 
 Forces are rotated/combined in body frame with thrust and gravity:
@@ -281,21 +289,17 @@ Forces are rotated/combined in body frame with thrust and gravity:
 Translational body equations:
 
 $$
-\begin{aligned}
-\dot{u} &= rv - qw + \frac{X}{m} \\
-\dot{v} &= pw - ru + \frac{Y}{m} \\
-\dot{w} &= qu - pv + \frac{Z}{m}
-\end{aligned}
+\dot{u} = rv - qw + \frac{X}{m},\quad
+\dot{v} = pw - ru + \frac{Y}{m},\quad
+\dot{w} = qu - pv + \frac{Z}{m}
 $$
 
 Rotational equations (diagonal inertia approximation used by this model):
 
 $$
-\begin{aligned}
-\dot{p} &= \frac{\mathcal{L} - (I_z-I_y)qr}{I_x} \\
-\dot{q} &= \frac{\mathcal{M} - (I_x-I_z)pr}{I_y} \\
-\dot{r} &= \frac{\mathcal{N} - (I_y-I_x)pq}{I_z}
-\end{aligned}
+\dot{p} = \frac{\mathcal{L} - (I_z-I_y)qr}{I_x},\quad
+\dot{q} = \frac{\mathcal{M} - (I_x-I_z)pr}{I_y},\quad
+\dot{r} = \frac{\mathcal{N} - (I_y-I_x)pq}{I_z}
 $$
 
 Euler kinematics are used for attitude propagation, and body velocity is transformed to NED for position update.
@@ -346,6 +350,30 @@ x=[x_N, y_E, z_D, u, v, w, \phi, \theta, \psi, p, q, r, T_a]^\top,
 \quad
 u=[\delta_a, \delta_e, \delta_r, T_c]^\top.
 $$
+
+### State and Input Symbol Glossary
+
+This table makes the local state-space model notation explicit.
+
+| Symbol | Physical name | Units | Meaning |
+|---|---|---:|---|
+| $x_N$ | North position | m | Inertial north displacement in NED frame |
+| $y_E$ | East position | m | Inertial east displacement in NED frame |
+| $z_D$ | Down position | m | Inertial down displacement ($h=-z_D$) |
+| $u$ | Forward body velocity | m/s | Velocity along body $x_b$ axis |
+| $v$ | Lateral body velocity | m/s | Velocity along body $y_b$ axis |
+| $w$ | Vertical body velocity | m/s | Velocity along body $z_b$ axis (down-positive) |
+| $\phi$ | Roll angle | rad | Aircraft bank Euler angle |
+| $\theta$ | Pitch angle | rad | Aircraft pitch Euler angle |
+| $\psi$ | Yaw angle | rad | Aircraft heading Euler angle |
+| $p$ | Roll rate | rad/s | Body roll rate about $x_b$ |
+| $q$ | Pitch rate | rad/s | Body pitch rate about $y_b$ |
+| $r$ | Yaw rate | rad/s | Body yaw rate about $z_b$ |
+| $T_a$ | Actual throttle state | - | Realized throttle after actuator lag |
+| $\delta_a$ | Aileron command | rad | Roll-control surface input |
+| $\delta_e$ | Elevator command | rad | Pitch-control surface input |
+| $\delta_r$ | Rudder command | rad | Yaw-control surface input |
+| $T_c$ | Throttle command | - | Commanded throttle input in $[0,1]$ |
 
 This local model captures conventional small-disturbance modes near trim (before deep-stall nonlinearity dominates):
 
@@ -471,43 +499,43 @@ and similarly for $\partial f_i/\partial u_j$.
 Representative analytic dependence of entries on physical parameters:
 
 - Translational rows use
-  $$
-  \dot{u}=rv-qw+\frac{X}{m},\ \dot{v}=pw-ru+\frac{Y}{m},\ \dot{w}=qu-pv+\frac{Z}{m}
-  $$
-  so entries such as $A_{u,u},A_{u,w},A_{u,\theta}$ depend on derivatives of $X$ with respect to $(u,w,\theta)$ divided by $m$.
+$$
+\dot{u}=rv-qw+\frac{X}{m},\quad \dot{v}=pw-ru+\frac{Y}{m},\quad \dot{w}=qu-pv+\frac{Z}{m}
+$$
+so entries such as $A_{u,u},A_{u,w},A_{u,\theta}$ depend on derivatives of $X$ with respect to $(u,w,\theta)$ divided by $m$.
 
 - Aerodynamic force derivatives are driven by
-  $$
-  X,Z \leftarrow qS\{C_L,C_D\},\quad q=\tfrac12\rho V^2,
-  $$
-  with $C_L$ and $C_D$ containing $C_{L\alpha},C_{Lq},C_{L\delta_e},C_{D0},k$ and stall terms.
+$$
+X,Z \gets qS\{C_L,C_D\},\quad q=\frac12\rho V^2
+$$
+with $C_L$ and $C_D$ containing $C_{L\alpha},C_{Lq},C_{L\delta_e},C_{D0},k$ and stall terms.
 
 - Rotational rows use
-  $$
-  \dot{p}=\frac{\mathcal L-(I_z-I_y)qr}{I_x},\quad
-  \dot{q}=\frac{\mathcal M-(I_x-I_z)pr}{I_y},\quad
-  \dot{r}=\frac{\mathcal N-(I_y-I_x)pq}{I_z},
-  $$
-  where
-  $$
-  \mathcal L=qSbC_l,\ \mathcal M=qScC_m,\ \mathcal N=qSbC_n.
-  $$
-  Thus entries in the $p,q,r$ rows are shaped by $(I_x,I_y,I_z)$ and stability/control derivatives such as $C_{lp},C_{lr},C_{l\beta},C_{mq},C_{m\alpha},C_{n\beta},C_{nr}$.
+$$
+\dot{p}=\frac{\mathcal L-(I_z-I_y)qr}{I_x},\quad
+\dot{q}=\frac{\mathcal M-(I_x-I_z)pr}{I_y},\quad
+\dot{r}=\frac{\mathcal N-(I_y-I_x)pq}{I_z}
+$$
+where
+$$
+\mathcal L=qSbC_l,\quad \mathcal M=qScC_m,\quad \mathcal N=qSbC_n
+$$
+Thus entries in the $p,q,r$ rows are shaped by $(I_x,I_y,I_z)$ and stability/control derivatives such as $C_{lp},C_{lr},C_{l\beta},C_{mq},C_{m\alpha},C_{n\beta},C_{nr}$.
 
 - Throttle state row is directly
-  $$
-  \dot T_a=\frac{T_c-T_a}{\tau_T}
-  $$
-  giving
-  $$
-  A_{T_a,T_a}=-\frac1{\tau_T},\quad B_{T_a,T_c}=\frac1{\tau_T}.
-  $$
+$$
+\dot T_a=\frac{T_c-T_a}{\tau_T}
+$$
+giving
+$$
+A_{T_a,T_a}=-\frac1{\tau_T},\quad B_{T_a,T_c}=\frac1{\tau_T}
+$$
 
 - Kinematic rows come from the rotation matrix and Euler kinematics, e.g.
-  $$
-  \dot\theta = q\cos\phi-r\sin\phi,
-  $$
-  and position rates from body-to-NED projection.
+$$
+\dot\theta = q\cos\phi-r\sin\phi
+$$
+and position rates from body-to-NED projection.
 
 Because the implemented aerodynamics include stall piecewise logic and on-ground conditionals, these Jacobians are valid only for the selected airborne trim point and small perturbations around it.
 
@@ -515,59 +543,81 @@ Because the implemented aerodynamics include stall piecewise logic and on-ground
 
 The following coefficients are the active values from the current parameter set used to build the nonlinear dynamics and therefore the linearization above.
 
-| Coefficient | Value |
-|---|---:|
-| $C_{L0}$ | 0.22 |
-| $C_{L\alpha}$ | 5.8 |
-| $C_{Lq}$ | 7.0 |
-| $C_{L\delta_e}$ | 0.85 |
-| $C_{D0}$ | 0.030 |
-| $k$ (induced drag) | 0.075 |
-| $C_{Y\beta}$ | -0.82 |
-| $C_{Y\delta_a}$ | 0.05 |
-| $C_{Y\delta_r}$ | 0.16 |
-| $C_{m0}$ | 0.00 |
-| $C_{m\alpha}$ | -0.85 |
-| $C_{mq}$ | -10.5 |
-| $C_{m\delta_e}$ | -1.80 |
-| $C_{l\beta}$ | -0.12 |
-| $C_{lp}$ | -0.55 |
-| $C_{lr}$ | 0.10 |
-| $C_{l\delta_a}$ | 0.16 |
-| $C_{l\delta_r}$ | 0.02 |
-| $C_{n\beta}$ | 0.25 |
-| $C_{np}$ | -0.02 |
-| $C_{nr}$ | -0.32 |
-| $C_{n\delta_a}$ | 0.01 |
-| $C_{n\delta_r}$ | -0.12 |
+Notation convention (for readers new to flight-dynamics derivatives):
+
+- Derivative units/normalization follow the conventions defined in the earlier **Derivative Units and Normalization Conventions** section.
+- $k$ is the induced-drag model factor in $C_D = C_{D0} + kC_L^2$, not a derivative.
+
+| Coefficient | Value | Physical meaning |
+|---|---:|---|
+| $C_{L0}$ | 0.22 | Lift coefficient at zero angle of attack |
+| $C_{L\alpha}$ | 5.8 | Lift-curve slope ($\partial C_L/\partial\alpha$) |
+| $C_{Lq}$ | 7.0 | Lift sensitivity to pitch rate |
+| $C_{L\delta_e}$ | 0.85 | Lift sensitivity to elevator deflection |
+| $C_{D0}$ | 0.030 | Zero-lift drag coefficient |
+| $k$ (induced drag) | 0.075 | Induced drag factor in $C_D=C_{D0}+kC_L^2$ |
+| $C_{Y\beta}$ | -0.82 | Side-force due to sideslip |
+| $C_{Y\delta_a}$ | 0.05 | Side-force due to aileron |
+| $C_{Y\delta_r}$ | 0.16 | Side-force due to rudder |
+| $C_{m0}$ | 0.00 | Pitching-moment coefficient at zero angle |
+| $C_{m\alpha}$ | -0.85 | Pitch static stability slope |
+| $C_{mq}$ | -10.5 | Pitch-rate damping derivative |
+| $C_{m\delta_e}$ | -1.80 | Pitching-moment due to elevator |
+| $C_{l\beta}$ | -0.12 | Roll moment due to sideslip (dihedral effect) |
+| $C_{lp}$ | -0.55 | Roll-rate damping derivative |
+| $C_{lr}$ | 0.10 | Roll moment due to yaw rate |
+| $C_{l\delta_a}$ | 0.16 | Roll control power from aileron |
+| $C_{l\delta_r}$ | 0.02 | Roll coupling from rudder |
+| $C_{n\beta}$ | 0.25 | Yaw static stability derivative (weathercock) |
+| $C_{np}$ | -0.02 | Yaw moment due to roll rate |
+| $C_{nr}$ | -0.32 | Yaw-rate damping derivative |
+| $C_{n\delta_a}$ | 0.01 | Yaw coupling from aileron |
+| $C_{n\delta_r}$ | -0.12 | Yaw control power from rudder |
 
 Stall/secondary-stall terms currently active:
 
-| Parameter | Value |
-|---|---:|
-| $\alpha_{stall}$ | 0.28 rad |
-| $C_{L,max}$ | 1.35 |
-| post-stall $\partial C_L / \partial \alpha$ | -2.4 |
-| stall drag quadratic gain | 4.2 |
-| post-stall nose-down $C_m$ gain | -3.0 |
-| stall autoroll-$\beta$ gain | -0.85 |
-| stall autoyaw-$\beta$ gain | 0.55 |
-| stall autoroll-$r$ gain | 0.30 |
-| stall autoyaw-$p$ gain | -0.20 |
-| stall asymmetry bias | 0.02 |
+| Parameter | Value | Description |
+|---|---:|---|
+| $\alpha_{stall}$ | 0.28 rad | Effective angle-of-attack threshold where stall modeling begins |
+| $C_{L,max}$ | 1.35 | Maximum lift coefficient cap near stall onset |
+| post-stall $\partial C_L / \partial \alpha$ | -2.4 | Lift slope used beyond stall (negative indicates lift breakdown) |
+| stall drag quadratic gain | 4.2 | Strength of additional drag rise as stall deepens |
+| post-stall nose-down $C_m$ gain | -3.0 | Extra nose-down pitching-moment contribution in stall |
+| stall autoroll-$\beta$ gain | -0.85 | Roll asymmetry sensitivity to sideslip in stall |
+| stall autoyaw-$\beta$ gain | 0.55 | Yaw asymmetry sensitivity to sideslip in stall |
+| stall autoroll-$r$ gain | 0.30 | Roll coupling sensitivity to yaw rate in stall |
+| stall autoyaw-$p$ gain | -0.20 | Yaw coupling sensitivity to roll rate in stall |
+| stall asymmetry bias | 0.02 | Small bias term to trigger left/right asymmetry near deep stall |
 
 Additional key constants:
 
-| Parameter | Value |
-|---|---:|
-| $m$ | 1100 kg |
-| $S$ | 16.2 m² |
-| $b$ | 10.9 m |
-| $c$ | 1.5 m |
-| $I_x, I_y, I_z$ | 1285, 1825, 2665 kg·m² |
-| $\rho$ | 1.225 kg/m³ |
-| $T_{max}$ | 6500 N |
-| $\tau_T$ | 0.35 s |
+| Parameter | Value | Description |
+|---|---:|---|
+| $m$ | 1100 kg | Aircraft mass used in translational dynamics |
+| $S$ | 16.2 m² | Wing reference area for aerodynamic force scaling |
+| $b$ | 10.9 m | Wing span used in roll/yaw moment scaling |
+| $c$ | 1.5 m | Mean aerodynamic chord used in pitch moment scaling |
+| $I_x, I_y, I_z$ | 1285, 1825, 2665 kg·m² | Principal moments of inertia about body axes |
+| $\rho$ | 1.225 kg/m³ | Air density used for dynamic pressure calculation |
+| $T_{max}$ | 6500 N | Maximum available engine thrust |
+| $\tau_T$ | 0.35 s | Throttle actuator time constant in first-order lag model |
+
+### Controller Gains and Limits (Current Defaults)
+
+These values are implemented in `src/flightsim/controller.py` and shape handling qualities in the interactive simulation.
+
+| Parameter | Value | Description |
+|---|---:|---|
+| roll attitude PID $(K_p, K_i, K_d)$ | $(1.8,\ 0.10,\ 0.08)$ | Bank-angle tracking gains for aileron command generation |
+| pitch attitude PID $(K_p, K_i, K_d)$ | $(1.3,\ 0.03,\ 0.03)$ | Pitch-angle tracking gains for elevator command generation |
+| yaw damper PID $(K_p, K_i, K_d)$ | $(0.16,\ 0.0,\ 0.015)$ | Yaw-rate damping gains for rudder stabilization around $r=0$ |
+| throttle PID $(K_p, K_i, K_d)$ | $(2.0,\ 1.5,\ 0.0)$ | Tracks commanded throttle against actual throttle state |
+| roll-rate damping gain | 0.18 | Direct $p$-feedback term subtracted from aileron command |
+| pitch-rate damping gain | 0.38 | Direct $q$-feedback term added to elevator command path |
+| max aileron command rate | 1.4 rad/s | Slew limit applied to commanded aileron each update |
+| max elevator command rate | 0.50 rad/s | Slew limit applied to commanded elevator each update |
+| pitch-target filter time constant | 0.35 s | First-order filter smoothing abrupt pitch command changes |
+| performance-mode climb-rate gain | 0.04 | Extra pitch augmentation toward climb-rate target after liftoff |
 
 If you change any coefficient in `src/flightsim/config.py`, the local Jacobian linearization changes; regenerate it around the desired trim point before controller design work.
 
